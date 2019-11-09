@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Creates VPC, Private Subnets and an S3 Endpoint'
+Parameters:
+  AvailabilityZoneAParameter:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: 'us-east-1a'
+    AllowedValues: 
+      - 'us-east-1a'
+      - 'us-east-1b'
+    Description: The AZ for the subnet to be provisioned in
+  AvailabilityZoneBParameter:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: 'us-east-1a'
+    AllowedValues: 
+      - 'us-east-1a'
+      - 'us-east-1b'
+    Description: The AZ for the subnet to be provisioned in
+Resources: 
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      EnableDnsHostnames: 'false'
+      EnableDnsSupport: 'false' 
+      InstanceTenancy: 'default'
+      Tags:
+        - Key: Name
+          Value: '10.71.0.0/24'
+  MyPrivateSubnetA: 
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZoneAParameter
+      CidrBlock: 10.0.0.0/25  
+      MapPublicIpOnLaunch: 'false'
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: 'Private A'
+        - Key: Reach
+          Value: private
+        - Key: VPC
+          Value: !Ref MyVPC
+  MyPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: !Ref AvailabilityZoneBParameter
+      CidrBlock: 10.0.0.128/25
+      MapPublicIpOnLaunch: 'false'
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: 'Private B'
+        - Key: Reach
+          Value: private
+        - Key: VPC
+          Value: !Ref MyVPC
+  MyCustomRouteTable: 
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref MyVPC
+  MyCustomRouteTableAssociationA: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref MyCustomRouteTable 
+      SubnetId: !Ref MyPrivateSubnetA
+  MyCustomRouteTableAssociationB: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref MyCustomRouteTable 
+      SubnetId: !Ref MyPrivateSubnetB
+  # MyEtlS3Bucket: 
+  #   Type: AWS::S3::Bucket
+  #   Properties: 
+  #     BucketName: 'etl-data-bucket'
+  MyVpcS3Endpoint: 
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PolicyDocument: '{
+        "Version":"2012-10-17",
+        "Statement":[{
+          "Effect":"Allow",
+          "Principal": "*",
+          "Action":["s3:GetObject", "s3:PutObject"],
+          "Resource":[ "arn:aws:s3:::etllab" , "arn:aws:s3:::etllab/*"]
+        }]
+      }'
+      RouteTableIds:
+        - !Ref MyCustomRouteTable
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcId: !Ref MyVPC
+
+Outputs:
+  MyVPCId: 
+    Description: 'VPC Id'
+    Value: !Ref MyVPC
+  SubnetAPrivate:
+    Description: 'Subnet A private id'
+    Value: !Ref  MyPrivateSubnetA
+  SubnetBPrivate:
+    Description: 'Subnet B private id'
+    Value: !Ref  MyPrivateSubnetB
+

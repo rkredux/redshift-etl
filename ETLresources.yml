@@ -1,0 +1,203 @@
+#A CF Template that provisions the following: 
+# * Amazon Redshift Cluster
+# * Secrets Manager secret for storing Amazon Redshift cluster information and credentials
+# * S3 Bucket preloaded with Python scripts and .sql files
+# * Identity and Access Management (IAM) Role for AWS Glue Python Shell job
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates Redshift Cluster
+
+Parameters:
+  VPC:
+    Description: The ID of the VPC to launch the Redshift Cluster in
+    Type: AWS::EC2::VPC::Id
+  RedshiftSubnets:
+    Description: Subnets for redshift (must be in the VPC selected)
+    Type: List<AWS::EC2::Subnet::Id>
+
+Resources: 
+
+  ScriptBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties: 
+      BucketName: etl-script-bucket
+    
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete  
+    Properties: 
+      BucketName: etl-data-bucket
+
+  RedshiftSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Subnet Group for redshift
+      SubnetIds: !Ref RedshiftSubnets
+    
+  RedshiftSecurityGroup: 
+    Type: AWS::EC2::SecurityGroup 
+    Properties:
+      GroupDescription: Security Group For The Redshift Cluster
+      GroupName: redshiftsecuritygroup
+      VpcId: !Ref VPC
+      #allow all traffic from the cluster bound to the internet on all ports 
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+
+  RedshiftSecurityGroupInboundRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      GroupId:
+        Fn::Get:
+          - RedshiftSecurityGroup
+          - GroupId
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: 
+        Fn::Get:
+          - RedshiftSecurityGroup
+          - GroupId
+  #we are not definiing a role explicity
+  #we are just saying let all redshif clusters to 
+  #assume an IAM role and then attaching permission 
+  #policy to that role
+  #This is just a way to reduce creating hundreds of 
+  #roles for your service        
+  RedshiftRole: 
+    Type: AWS::IAM::Role
+    Description: Allow Redshift to assume role to sts service
+    Properties:
+      AssumeRolePolicyDocument: 
+        Statement: 
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: redshift.amazonaws.com
+          Sid: ''
+        Version: 2012-10-17
+
+  RedshiftPolicy: 
+    Type: AWS::IAM::Policy 
+    Properties:
+      Roles: 
+      - Ref: RedshiftRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action:
+          - s3:GetBucketLocation
+          - s3:GetObject
+          - s3:ListBucket
+          Effect: Allow
+          Resource:
+          - arn:aws:s3:::amazon-reviews-pds
+          - arn:aws:s3:::amazon-reviews-pds/*
+        - Action:
+          - glue:CreateDatabase
+          - glue:DeleteDatabase
+          - glue:GetDatabase
+          - glue:GetDatabases
+          - glue:UpdateDatabase
+          - glue:CreateTable
+          - glue:DeleteTable
+          - glue:BatchDeleteTable
+          - glue:UpdateTable
+          - glue:GetTable
+          - glue:GetTables
+          - glue:BatchCreatePartition
+          - glue:CreatePartition
+          - glue:DeletePartition
+          - glue:BatchDeletePartition
+          - glue:UpdatePartition
+          - glue:GetPartition
+          - glue:GetPartitions
+          - glue:BatchGetPartition
+          Effect: Allow
+          Resource:
+          - '*'
+        - Action:
+          - s3:GetBucketLocation
+          - s3:GetObject
+          - s3:ListBucket
+          - s3:PutObject
+          Effect: Allow
+          Resource: 
+          - !Join ['', ['arn:aws:s3:::', !Ref DataBucket ]]
+          - !Join ['', ['arn:aws:s3:::', !Ref DataBucket, '/*']]
+      PolicyName: redshift_etl_policy
+
+  #generates secrets in secret manager which 
+  #will be later used by Redshift Cluster
+  RedshiftSecret: 
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: 'reviewssecret'
+      Description: "This is a Secrets Manager secret for Redshift"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "master"}'
+        GenerateStringKey: "password"
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    Properties:
+      ClusterSubnetGroupName:
+        Ref: RedshiftSubnetGroup
+      ClusterType: single-node
+      DBName: reviews
+      PubliclyAccessible: false
+      IamRoles:
+      - Fn::GetAtt:
+        - RedshiftRole
+        - Arn
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref RedshiftSecret, ':SecretString:password}}' ]]
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref RedshiftSecret, ':SecretString:username}}' ]]
+      NodeType: dc1.large
+      VpcSecurityGroupIds:
+      - Ref: RedshiftSecurityGroup
+
+  GlueExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+
+  GluePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action:
+          - s3:GetBucketLocation
+          - s3:GetObject
+          - s3:ListBucket
+          Effect: Allow
+          Resource:
+          - !Join ['', ['arn:aws:s3:::', !Ref ScriptBucket] ]
+          - !Join ['', ['arn:aws:s3:::', !Ref ScriptBucket, '/*'] ]
+        #access to redshift cluster secrets i.e. username and password
+          - Action:
+          - secretsmanager:*
+          Effect: Allow
+          Resource: !Ref RedshiftSecret
+      PolicyName: etl_glue_policy
+      Roles:
+      - Ref: GlueExecutionRole
+
+#TO DO Stepfunction 
+
+
